@@ -1,25 +1,35 @@
 #!/bin/bash
-# Time 20 pit wall lines against a running tts-server with the voice locked.
+# Time 20 pit wall lines against one tts-server with the voice locked.
 #
-# Start the server with the reference clip first (see omnivoice.service):
-#   build/tts-server --model ... --codec ... \
-#       --ref-audio audio/reference-01.wav --ref-text audio/reference-01.txt
+# The script starts its own tts-server with the reference clip, waits for
+# /health, sends every line over HTTP and stops the server on exit. The model
+# stays loaded across all 20 calls.
 #
 # Every request sends a fixed seed, both MaskGIT temperatures at 0 and no
 # instructions, so the voice comes from the reference clip alone.
 #
-# Usage: scripts/benchmark-pitwall.sh [host] [port] [voice]
-#   voice: a name registered over POST /v1/audio/voices. Empty uses the
-#   server startup reference.
+# The server has no steps flag, so it runs the MaskGIT default of 32 steps.
+# The old CLI benchmark used --steps 14, so its timings are not directly
+# comparable.
+#
+# Usage: scripts/benchmark-pitwall.sh [host] [port]
+# Run it from any directory. Paths resolve from the repo root.
+
+cd "$(dirname "$0")/.." || exit 1
 
 HOST="${1:-127.0.0.1}"
 PORT="${2:-8080}"
-VOICE="${3:-}"
+MODEL="models/omnivoice-base-Q8_0.gguf"
+CODEC="models/omnivoice-tokenizer-F32.gguf"
+REF_AUDIO="audio/reference-01.wav"
+REF_TEXT="audio/reference-01.txt"
 LANGUAGE="English"
 SEED=42
 POSITION_TEMPERATURE=0
 CLASS_TEMPERATURE=0
 OUTPUT_DIR="./bench_outputs"
+SERVER_LOG="$OUTPUT_DIR/server.log"
+HEALTH_TIMEOUT=600
 
 mkdir -p "$OUTPUT_DIR"
 
@@ -47,15 +57,67 @@ chatter_lines=(
     "Understood, we are checking the strategy now."
 )
 
-voice_field=""
-if [ -n "$VOICE" ]; then
-    voice_field="\"voice\":\"$VOICE\","
+for tool in curl jq bc; do
+    if ! command -v "$tool" >/dev/null; then
+        echo "$tool is required"
+        exit 1
+    fi
+done
+
+health_status() {
+    curl -s -o /dev/null -w "%{http_code}" "http://$HOST:$PORT/health"
+}
+
+# A server already on the port would answer /health and get benchmarked
+# instead of ours.
+if [ "$(health_status)" = "200" ]; then
+    echo "A server is already running on $HOST:$PORT. Stop it or pass another port."
+    exit 1
 fi
+
+./build/tts-server \
+    --model "$MODEL" \
+    --codec "$CODEC" \
+    --ref-audio "$REF_AUDIO" --ref-text "$REF_TEXT" \
+    --host "$HOST" --port "$PORT" --lang "$LANGUAGE" >"$SERVER_LOG" 2>&1 &
+SERVER_PID=$!
+
+# SIGTERM lets the server finish the request in flight, which takes minutes on
+# CPU. Force it after 5 s so Ctrl-C returns promptly.
+stop_server() {
+    kill "$SERVER_PID" 2>/dev/null
+    for _ in 1 2 3 4 5; do
+        kill -0 "$SERVER_PID" 2>/dev/null || break
+        sleep 1
+    done
+    kill -9 "$SERVER_PID" 2>/dev/null
+    wait "$SERVER_PID" 2>/dev/null
+}
+trap stop_server EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+echo -n "Waiting for tts-server (log: $SERVER_LOG) ... "
+waited=0
+until [ "$(health_status)" = "200" ]; do
+    if ! kill -0 "$SERVER_PID" 2>/dev/null; then
+        echo "server exited during startup:"
+        cat "$SERVER_LOG"
+        exit 1
+    fi
+    if [ "$waited" -ge "$HEALTH_TIMEOUT" ]; then
+        echo "no /health response after ${HEALTH_TIMEOUT}s"
+        exit 1
+    fi
+    sleep 1
+    waited=$((waited + 1))
+done
+echo "ready after ${waited}s"
 
 echo "=================================================="
 echo "Starting OmniVoice Benchmark: 20 Sequential Calls"
 echo "=================================================="
-echo "Server: http://$HOST:$PORT  Voice: ${VOICE:-startup reference}"
+echo "Server: http://$HOST:$PORT  Voice: $REF_AUDIO"
 echo "Seed: $SEED  Temperatures: position $POSITION_TEMPERATURE, class $CLASS_TEMPERATURE"
 echo "--------------------------------------------------"
 
@@ -66,7 +128,14 @@ for line in "${chatter_lines[@]}"; do
     count=$((count + 1))
     echo -n "[$count/20] Generating: \"$line\" ... "
 
-    body="{\"input\":\"$line\",${voice_field}\"language\":\"$LANGUAGE\",\"response_format\":\"wav\",\"seed\":$SEED,\"position_temperature\":$POSITION_TEMPERATURE,\"class_temperature\":$CLASS_TEMPERATURE}"
+    body=$(jq -cn \
+        --arg input "$line" \
+        --arg language "$LANGUAGE" \
+        --argjson seed "$SEED" \
+        --argjson position_temperature "$POSITION_TEMPERATURE" \
+        --argjson class_temperature "$CLASS_TEMPERATURE" \
+        '{input: $input, language: $language, response_format: "wav", seed: $seed,
+          position_temperature: $position_temperature, class_temperature: $class_temperature}')
 
     start_time=$(date +%s%N)
     status=$(curl -s -o "$OUTPUT_DIR/call_$count.wav" -w "%{http_code}" -X POST "http://$HOST:$PORT/v1/audio/speech" \
