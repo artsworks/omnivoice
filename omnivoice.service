@@ -1,0 +1,20 @@
+# ~/.config/systemd/user/omnivoice.service
+
+[Unit]
+Description=OmniVoice Persistent TTS Server
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/ak/Documents/Labs/omnivoice.cpp
+ExecStart=/home/ak/Documents/Labs/omnivoice.cpp/build/tts-server \
+  --model /home/ak/Documents/Labs/omnivoice.cpp/models/omnivoice-base-Q8_0.gguf \
+  --codec /home/ak/Documents/Labs/omnivoice.cpp/models/omnivoice-tokenizer-F32.gguf \
+  --ref-audio /home/ak/Documents/Labs/omnivoice.cpp/audio/reference-01.wav \
+  --host 0.0.0.0 \
+  --port 8080
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=default.target
