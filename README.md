@@ -108,6 +108,13 @@ A `.rvq` payload must come from the same codec quantisation the server
 runs, otherwise the codes are read in the wrong space and the voice is
 not the expected one.
 
+`--ref-audio ref.wav --ref-text ref.txt` sets a default voice. A request
+without `voice` then clones that clip instead of running voice design. The
+transcript must match the clip word for word. `position_temperature` and
+`class_temperature` override the MaskGIT sampler per request. Both at 0
+give bit deterministic output. See `playground/README.md` for the full
+voice lock.
+
 ## Embedding the library
 
 The CLI tools are thin wrappers over a public ABI. Single-header,
