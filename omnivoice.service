@@ -11,6 +11,7 @@ ExecStart=/home/ak/Documents/Labs/omnivoice.cpp/build/tts-server \
   --model /home/ak/Documents/Labs/omnivoice.cpp/models/omnivoice-base-Q8_0.gguf \
   --codec /home/ak/Documents/Labs/omnivoice.cpp/models/omnivoice-tokenizer-F32.gguf \
   --ref-audio /home/ak/Documents/Labs/omnivoice.cpp/audio/reference-01.wav \
+  --ref-text /home/ak/Documents/Labs/omnivoice.cpp/audio/reference-01.txt \
   --host 0.0.0.0 \
   --port 8080
 Restart=always

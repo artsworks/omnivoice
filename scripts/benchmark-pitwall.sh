@@ -1,11 +1,24 @@
 #!/bin/bash
+# Time 20 pit wall lines against a running tts-server with the voice locked.
+#
+# Start the server with the reference clip first (see omnivoice.service):
+#   build/tts-server --model ... --codec ... \
+#       --ref-audio audio/reference-01.wav --ref-text audio/reference-01.txt
+#
+# Every request sends a fixed seed, both MaskGIT temperatures at 0 and no
+# instructions, so the voice comes from the reference clip alone.
+#
+# Usage: scripts/benchmark-pitwall.sh [host] [port] [voice]
+#   voice: a name registered over POST /v1/audio/voices. Empty uses the
+#   server startup reference.
 
-# Configuration
-MODEL="models/omnivoice-base-Q8_0.gguf"
-CODEC="models/omnivoice-tokenizer-F32.gguf"
-INSTRUCT="male, young adult, moderate pitch, australian accent"
-STEPS=14
+HOST="${1:-127.0.0.1}"
+PORT="${2:-8080}"
+VOICE="${3:-}"
+LANGUAGE="English"
 SEED=42
+POSITION_TEMPERATURE=0
+CLASS_TEMPERATURE=0
 OUTPUT_DIR="./bench_outputs"
 
 mkdir -p "$OUTPUT_DIR"
@@ -27,18 +40,23 @@ chatter_lines=(
     "The car ahead is pitting. Let us try the overcut."
     "Watch the curbs at turn four, you are pushing track limits."
     "Rain expected in five minutes. Stay out on the slicks for now."
-    " DRS is now enabled. You are within one second of the car ahead."
+    "DRS is now enabled. You are within one second of the car ahead."
     "Brake temperatures are critical. Clear the air ducts on the straight."
     "That is the end of the session. Bring the car home."
     "Engine temps are slightly high, try to get some clean air."
     "Understood, we are checking the strategy now."
 )
 
+voice_field=""
+if [ -n "$VOICE" ]; then
+    voice_field="\"voice\":\"$VOICE\","
+fi
+
 echo "=================================================="
 echo "Starting OmniVoice Benchmark: 20 Sequential Calls"
 echo "=================================================="
-echo "Model: $MODEL"
-echo "Steps: $STEPS"
+echo "Server: http://$HOST:$PORT  Voice: ${VOICE:-startup reference}"
+echo "Seed: $SEED  Temperatures: position $POSITION_TEMPERATURE, class $CLASS_TEMPERATURE"
 echo "--------------------------------------------------"
 
 total_time=0
@@ -47,27 +65,22 @@ count=0
 for line in "${chatter_lines[@]}"; do
     count=$((count + 1))
     echo -n "[$count/20] Generating: \"$line\" ... "
-    
-    # Track starting time in nanoseconds
+
+    body="{\"input\":\"$line\",${voice_field}\"language\":\"$LANGUAGE\",\"response_format\":\"wav\",\"seed\":$SEED,\"position_temperature\":$POSITION_TEMPERATURE,\"class_temperature\":$CLASS_TEMPERATURE}"
+
     start_time=$(date +%s%N)
-    
-    # Execute the TTS pipeline
-    echo "$line" | ./build/omnivoice-tts \
-      --model "$MODEL" \
-      --codec "$CODEC" \
-      --lang English \
-      --instruct "$INSTRUCT" \
-      --steps $STEPS \
-      --seed $SEED \
-      -o "$OUTPUT_DIR/call_$count.wav" > /dev/null 2>&1
-      
-    # Track ending time
+    status=$(curl -s -o "$OUTPUT_DIR/call_$count.wav" -w "%{http_code}" -X POST "http://$HOST:$PORT/v1/audio/speech" \
+        -H "Content-Type: application/json" -d "$body")
     end_time=$(date +%s%N)
-    
-    # Calculate execution duration in seconds
+
+    if [ "$status" != "200" ]; then
+        echo "HTTP $status: $(cat "$OUTPUT_DIR/call_$count.wav")"
+        exit 1
+    fi
+
     duration=$(echo "scale=3; ($end_time - $start_time) / 1000000000" | bc)
     echo "${duration}s"
-    
+
     total_time=$(echo "scale=3; $total_time + $duration" | bc)
 done
 

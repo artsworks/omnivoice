@@ -38,7 +38,7 @@
 struct tts_request {
     std::string input;         // text to speak
     std::string lang;          // language label, empty keeps the server default
-    std::string voice;         // registered voice name, empty runs voice design
+    std::string voice;         // registered voice name, empty uses the startup reference (or voice design)
     std::string instructions;  // OAI instructions, mapped to the ABI instruct field
     std::string format;        // "pcm" (stream) or "wav" (one-shot)
 
@@ -46,6 +46,11 @@ struct tts_request {
     // random seed per request, matching the CLI convention; anything
     // else forwards verbatim for reproducible output.
     int64_t seed;
+
+    // Optional MaskGIT sampler temperatures. Negative or absent keeps the
+    // server default. Both at 0 gives greedy, bit deterministic decoding.
+    float position_temperature;
+    float class_temperature;
 };
 
 // One voice registration parsed from the POST /v1/audio/voices JSON body.
@@ -173,6 +178,23 @@ static bool tts_parse_request(const std::string & body, tts_request & req, std::
         return false;
     }
     req.seed = seed ? yyjson_get_sint(seed) : -1;
+
+    const char * temp_keys[2] = { "position_temperature", "class_temperature" };
+    float *      temp_dst[2]  = { &req.position_temperature, &req.class_temperature };
+    for (int i = 0; i < 2; i++) {
+        yyjson_val * t = yyjson_obj_get(root, temp_keys[i]);
+        *temp_dst[i]   = -1.0f;
+        if (!t) {
+            continue;
+        }
+        const double v = yyjson_is_num(t) ? yyjson_get_num(t) : -1.0;
+        if (!(v >= 0.0) || !std::isfinite(v)) {
+            err = std::string("'") + temp_keys[i] + "' must be a non-negative number";
+            yyjson_doc_free(doc);
+            return false;
+        }
+        *temp_dst[i] = (float) v;
+    }
 
     yyjson_doc_free(doc);
 

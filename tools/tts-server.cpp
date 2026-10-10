@@ -5,12 +5,14 @@
 //
 // OmniVoice has no named speaker table: every voice comes from the
 // registry, filled over POST /v1/audio/voices. A request without a voice
-// runs voice design from the instructions field.
+// uses the startup reference (--ref-audio + --ref-text) when one is set,
+// otherwise it runs voice design from the instructions field.
 
 #include "tts-server.h"
 
 #include "omnivoice.h"
 #include "rvq-file.h"
+#include "utf8.h"
 #include "version.h"
 
 #include <cstdio>
@@ -40,6 +42,11 @@ struct voice_entry {
 static std::mutex                                   g_voices_mutex;
 static std::unordered_map<std::string, voice_entry> g_voices;
 
+// Startup reference from --ref-audio / --ref-text. Encoded once before the
+// server listens and never modified afterwards, so synthesis reads it
+// without a lock. Empty ref_codes means no startup reference.
+static voice_entry g_default_voice = {};
+
 static void print_usage(const char * prog) {
     fprintf(stderr, "omnivoice.cpp %s\n\n", OMNIVOICE_VERSION);
     fprintf(stderr,
@@ -51,9 +58,38 @@ static void print_usage(const char * prog) {
             "  --host <ip>             Listen address (default: 127.0.0.1)\n"
             "  --port <n>              Listen port (default: 8080)\n"
             "  --lang <str>            Language label when a request omits one (default 'None')\n"
+            "  --ref-audio <wav>       Reference clip, the default voice for requests without 'voice'\n"
+            "  --ref-text <path>       Transcript file for --ref-audio (required with it, verbatim)\n"
             "  --no-fa                 Disable flash attention\n"
             "  --clamp-fp16            Clamp hidden states to FP16 range\n",
             prog);
+}
+
+// Read a transcript file: UTF-8 normalised, trailing newlines dropped,
+// same as the omnivoice-tts --ref-text path.
+static bool read_text_file(const char * path, std::string & out) {
+    FILE * f = utf8_fopen(path, "rb");
+    if (!f) {
+        return false;
+    }
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (sz < 0) {
+        fclose(f);
+        return false;
+    }
+    out.resize((size_t) sz);
+    if (sz > 0 && fread(&out[0], 1, (size_t) sz, f) != (size_t) sz) {
+        fclose(f);
+        return false;
+    }
+    fclose(f);
+    utf8_normalize(out);
+    while (!out.empty() && (out.back() == '\n' || out.back() == '\r')) {
+        out.pop_back();
+    }
+    return true;
 }
 
 // Trim a path down to its file name for the reported model id.
@@ -68,8 +104,10 @@ int main(int argc, char ** argv) {
     const char *  codec_path = NULL;
     std::string   lang       = "None";
     server_config cfg;
-    bool          use_fa     = true;
-    bool          clamp_fp16 = false;
+    bool          use_fa         = true;
+    bool          clamp_fp16     = false;
+    const char *  ref_audio_path = NULL;
+    const char *  ref_text_path  = NULL;
 
     for (int i = 1; i < argc; i++) {
         const char * arg = argv[i];
@@ -83,6 +121,10 @@ int main(int argc, char ** argv) {
             cfg.port = std::atoi(argv[++i]);
         } else if (!std::strcmp(arg, "--lang") && i + 1 < argc) {
             lang = argv[++i];
+        } else if (!std::strcmp(arg, "--ref-audio") && i + 1 < argc) {
+            ref_audio_path = argv[++i];
+        } else if (!std::strcmp(arg, "--ref-text") && i + 1 < argc) {
+            ref_text_path = argv[++i];
         } else if (!std::strcmp(arg, "--no-fa")) {
             use_fa = false;
         } else if (!std::strcmp(arg, "--clamp-fp16")) {
@@ -97,6 +139,16 @@ int main(int argc, char ** argv) {
         print_usage(argv[0]);
         return 1;
     }
+    if (!ref_audio_path != !ref_text_path) {
+        fprintf(stderr, "[Server] FATAL: --ref-audio and --ref-text must be given together\n");
+        return 1;
+    }
+    if (ref_text_path) {
+        if (!read_text_file(ref_text_path, g_default_voice.ref_text) || g_default_voice.ref_text.empty()) {
+            fprintf(stderr, "[Server] FATAL: cannot read a non-empty transcript from %s\n", ref_text_path);
+            return 1;
+        }
+    }
 
     struct ov_init_params iparams;
     ov_init_default_params(&iparams);
@@ -109,6 +161,32 @@ int main(int argc, char ** argv) {
     if (!ov) {
         fprintf(stderr, "[Server] FATAL: %s\n", ov_last_error());
         return 1;
+    }
+
+    // Same preprocessing as a WAV registered over POST /v1/audio/voices.
+    if (ref_audio_path) {
+        int     T   = 0;
+        float * pcm = audio_read_mono(ref_audio_path, 24000, &T);
+        if (!pcm) {
+            fprintf(stderr, "[Server] FATAL: cannot decode %s\n", ref_audio_path);
+            ov_free(ov);
+            return 1;
+        }
+
+        enum ov_status rc;
+        {
+            std::lock_guard<std::mutex> lock(g_synth_mutex);
+            rc = ov_extract_voice_ref(ov, pcm, T, &g_default_voice.ref);
+        }
+
+        free(pcm);
+        if (rc != OV_STATUS_OK) {
+            fprintf(stderr, "[Server] FATAL: %s: %s\n", ref_audio_path, ov_last_error());
+            ov_free(ov);
+            return 1;
+        }
+        fprintf(stderr, "[Server] default voice from %s (K=%d T=%d)\n", ref_audio_path,
+                g_default_voice.ref.num_codebooks, g_default_voice.ref.ref_T);
     }
 
     tts_backend be;
@@ -197,7 +275,8 @@ int main(int argc, char ** argv) {
     // one-shot buffer (wav). OmniVoice streams at chunk_duration_sec
     // granularity, the same path either way. A named voice injects its
     // pre-encoded reference ; an unknown name is rejected instead of
-    // silently falling back to voice design.
+    // silently falling back to voice design. No name uses the startup
+    // reference when one is loaded.
     be.synthesize = [ov, &lang](const tts_request & req, const tts_sink & sink, std::string & err) -> int {
         struct ov_tts_params p;
         ov_tts_default_params(&p);
@@ -226,6 +305,10 @@ int main(int argc, char ** argv) {
             p.ref_audio_tokens = voice_codes.data();
             p.ref_T            = voice_ref_T;
             p.ref_text         = voice_ref_text.c_str();
+        } else if (req.voice.empty() && g_default_voice.ref.ref_codes) {
+            p.ref_audio_tokens = g_default_voice.ref.ref_codes;
+            p.ref_T            = g_default_voice.ref.ref_T;
+            p.ref_text         = g_default_voice.ref_text.c_str();
         }
         if (!req.instructions.empty()) {
             p.instruct = req.instructions.c_str();
@@ -235,6 +318,12 @@ int main(int argc, char ** argv) {
         // fresh hardware random seed, anything else lands verbatim on
         // the MaskGIT sampler for reproducible output.
         p.mg_seed = (req.seed < 0) ? (uint64_t) std::random_device{}() : (uint64_t) req.seed;
+        if (req.position_temperature >= 0.0f) {
+            p.mg_position_temperature = req.position_temperature;
+        }
+        if (req.class_temperature >= 0.0f) {
+            p.mg_class_temperature = req.class_temperature;
+        }
 
         // Trampoline : the C ABI on_chunk forwards to the C++ sink.
         const tts_sink * sink_ptr = &sink;
@@ -254,6 +343,7 @@ int main(int argc, char ** argv) {
     };
 
     int rc = tts_server_run(be, cfg);
+    ov_voice_ref_free(&g_default_voice.ref);
     ov_free(ov);
     return rc;
 }
