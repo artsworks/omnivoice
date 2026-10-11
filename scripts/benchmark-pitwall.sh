@@ -57,15 +57,22 @@ chatter_lines=(
     "Understood, we are checking the strategy now."
 )
 
-for tool in curl jq bc; do
+for tool in curl jq bc flock ss; do
     if ! command -v "$tool" >/dev/null; then
         echo "$tool is required"
         exit 1
     fi
 done
 
+# Runs from this checkout share the output files, so only one runs at a time.
+exec 9>"$OUTPUT_DIR/.lock"
+if ! flock -n 9; then
+    echo "Another benchmark is using $OUTPUT_DIR. Wait for it to finish."
+    exit 1
+fi
+
 health_status() {
-    curl -s -o /dev/null -w "%{http_code}" "http://$HOST:$PORT/health"
+    curl -s --connect-timeout 5 --max-time 5 -o /dev/null -w "%{http_code}" "http://$HOST:$PORT/health"
 }
 
 # A server already on the port would answer /health and get benchmarked
@@ -79,7 +86,7 @@ fi
     --model "$MODEL" \
     --codec "$CODEC" \
     --ref-audio "$REF_AUDIO" --ref-text "$REF_TEXT" \
-    --host "$HOST" --port "$PORT" --lang "$LANGUAGE" >"$SERVER_LOG" 2>&1 &
+    --host "$HOST" --port "$PORT" --lang "$LANGUAGE" >"$SERVER_LOG" 2>&1 9>&- &
 SERVER_PID=$!
 
 # SIGTERM lets the server finish the request in flight, which takes minutes on
@@ -97,22 +104,27 @@ trap stop_server EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
+# Another process can bind the port while our server loads. Only accept
+# /health once SERVER_PID owns the listening socket.
+owns_port() {
+    ss -Hltnp "sport = :$PORT" | grep -q "pid=$SERVER_PID,"
+}
+
 echo -n "Waiting for tts-server (log: $SERVER_LOG) ... "
-waited=0
-until [ "$(health_status)" = "200" ]; do
+start_wait=$SECONDS
+until [ "$(health_status)" = "200" ] && owns_port; do
     if ! kill -0 "$SERVER_PID" 2>/dev/null; then
         echo "server exited during startup:"
         cat "$SERVER_LOG"
         exit 1
     fi
-    if [ "$waited" -ge "$HEALTH_TIMEOUT" ]; then
+    if [ $((SECONDS - start_wait)) -ge "$HEALTH_TIMEOUT" ]; then
         echo "no /health response after ${HEALTH_TIMEOUT}s"
         exit 1
     fi
     sleep 1
-    waited=$((waited + 1))
 done
-echo "ready after ${waited}s"
+echo "ready after $((SECONDS - start_wait))s"
 
 echo "=================================================="
 echo "Starting OmniVoice Benchmark: 20 Sequential Calls"
