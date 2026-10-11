@@ -149,10 +149,14 @@ for line in "${chatter_lines[@]}"; do
         '{input: $input, language: $language, response_format: "wav", seed: $seed,
           position_temperature: $position_temperature, class_temperature: $class_temperature}')
 
+    # Bash defers traps until a foreground command returns. Running curl in
+    # the background and waiting on it lets SIGTERM stop the run mid-request.
     start_time=$(date +%s%N)
-    status=$(curl -s -o "$OUTPUT_DIR/call_$count.wav" -w "%{http_code}" -X POST "http://$HOST:$PORT/v1/audio/speech" \
-        -H "Content-Type: application/json" -d "$body")
+    curl -s -o "$OUTPUT_DIR/call_$count.wav" -w "%{http_code}" -X POST "http://$HOST:$PORT/v1/audio/speech" \
+        -H "Content-Type: application/json" -d "$body" >"$OUTPUT_DIR/.status" &
+    wait $!
     end_time=$(date +%s%N)
+    status=$(cat "$OUTPUT_DIR/.status")
 
     if [ "$status" != "200" ]; then
         echo "HTTP $status: $(cat "$OUTPUT_DIR/call_$count.wav")"
