@@ -5,12 +5,11 @@
 # /health, sends every line over HTTP and stops the server on exit. The model
 # stays loaded across all 20 calls.
 #
-# Every request sends a fixed seed, both MaskGIT temperatures at 0 and no
-# instructions, so the voice comes from the reference clip alone.
+# The server is locked. It owns the seed, steps, temperatures, voice,
+# language and response format. Requests send only input.
 #
-# The server has no steps flag, so it runs the MaskGIT default of 32 steps.
-# The old CLI benchmark used --steps 14, so its timings are not directly
-# comparable.
+# The server runs 8 MaskGIT steps. The old CLI benchmark used --steps 14
+# and the server default is 32, so timings are not comparable.
 #
 # Usage: scripts/benchmark-pitwall.sh [host] [port]
 # Run it from any directory. Paths resolve from the repo root.
@@ -24,7 +23,8 @@ CODEC="models/omnivoice-tokenizer-F32.gguf"
 REF_AUDIO="audio/reference-01.wav"
 REF_TEXT="audio/reference-01.txt"
 LANGUAGE="English"
-SEED=42
+STEPS=8
+SEED=0
 POSITION_TEMPERATURE=0
 CLASS_TEMPERATURE=0
 OUTPUT_DIR="./bench_outputs"
@@ -86,7 +86,10 @@ fi
     --model "$MODEL" \
     --codec "$CODEC" \
     --ref-audio "$REF_AUDIO" --ref-text "$REF_TEXT" \
-    --host "$HOST" --port "$PORT" --lang "$LANGUAGE" >"$SERVER_LOG" 2>&1 9>&- &
+    --host "$HOST" --port "$PORT" --lang "$LANGUAGE" \
+    --locked --steps "$STEPS" --seed "$SEED" \
+    --position-temperature "$POSITION_TEMPERATURE" --class-temperature "$CLASS_TEMPERATURE" \
+    >"$SERVER_LOG" 2>&1 9>&- &
 SERVER_PID=$!
 
 # SIGTERM lets the server finish the request in flight, which takes minutes on
@@ -142,12 +145,7 @@ for line in "${chatter_lines[@]}"; do
 
     body=$(jq -cn \
         --arg input "$line" \
-        --arg language "$LANGUAGE" \
-        --argjson seed "$SEED" \
-        --argjson position_temperature "$POSITION_TEMPERATURE" \
-        --argjson class_temperature "$CLASS_TEMPERATURE" \
-        '{input: $input, language: $language, response_format: "wav", seed: $seed,
-          position_temperature: $position_temperature, class_temperature: $class_temperature}')
+        '{input: $input}')
 
     # Bash defers traps until a foreground command returns. Running curl in
     # the background and waiting on it lets SIGTERM stop the run mid-request.
@@ -168,6 +166,26 @@ for line in "${chatter_lines[@]}"; do
 
     total_time=$(echo "scale=3; $total_time + $duration" | bc)
 done
+
+repeat_line="${chatter_lines[0]}"
+repeat_body=$(jq -cn --arg input "$repeat_line" '{input: $input}')
+repeat_start=$(date +%s%N)
+curl -s -o "$OUTPUT_DIR/call_repeat.wav" -w "%{http_code}" -X POST "http://$HOST:$PORT/v1/audio/speech" \
+    -H "Content-Type: application/json" -d "$repeat_body" >"$OUTPUT_DIR/.repeat-status" &
+wait $!
+repeat_end=$(date +%s%N)
+repeat_status=$(cat "$OUTPUT_DIR/.repeat-status")
+if [ "$repeat_status" != "200" ]; then
+    echo "Repeat request failed with HTTP $repeat_status: $(cat "$OUTPUT_DIR/call_repeat.wav")"
+    exit 1
+fi
+repeat_duration=$(echo "scale=3; ($repeat_end - $repeat_start) / 1000000000" | bc)
+if cmp -s "$OUTPUT_DIR/call_repeat.wav" "$OUTPUT_DIR/call_1.wav"; then
+    echo "Repeat of line 1 (cache hit): ${repeat_duration}s, identical audio: yes"
+else
+    echo "Repeat of line 1 (cache hit): ${repeat_duration}s, identical audio: no"
+    exit 1
+fi
 
 average_time=$(echo "scale=3; $total_time / 20" | bc)
 

@@ -1,3 +1,4 @@
+# The Q8_0 tokenizer is not fetched by models.sh. Download it with the hf command in README.md first.
 # ~/.config/systemd/user/omnivoice.service
 
 [Unit]
@@ -9,9 +10,10 @@ Type=simple
 WorkingDirectory=/home/ak/Documents/Labs/omnivoice.cpp
 ExecStart=/home/ak/Documents/Labs/omnivoice.cpp/build/tts-server \
   --model /home/ak/Documents/Labs/omnivoice.cpp/models/omnivoice-base-Q8_0.gguf \
-  --codec /home/ak/Documents/Labs/omnivoice.cpp/models/omnivoice-tokenizer-F32.gguf \
+  --codec /home/ak/Documents/Labs/omnivoice.cpp/models/omnivoice-tokenizer-Q8_0.gguf \
   --ref-audio /home/ak/Documents/Labs/omnivoice.cpp/audio/reference-01.wav \
   --ref-text /home/ak/Documents/Labs/omnivoice.cpp/audio/reference-01.txt \
+  --locked --steps 8 --seed 0 --position-temperature 0 --class-temperature 0 \
   --host 0.0.0.0 \
   --port 8080
 Restart=always

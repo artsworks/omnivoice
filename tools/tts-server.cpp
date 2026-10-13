@@ -15,6 +15,7 @@
 #include "utf8.h"
 #include "version.h"
 
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -60,7 +61,13 @@ static void print_usage(const char * prog) {
             "  --lang <str>            Language label when a request omits one (default 'None')\n"
             "  --ref-audio <wav>       Reference clip, the default voice for requests without 'voice'\n"
             "  --ref-text <path>       Transcript file for --ref-audio (required with it, verbatim)\n"
+            "  --locked                Use server-owned synthesis parameters and WAV output\n"
+            "  --steps <int>           MaskGIT steps in locked mode (default: 32)\n"
+            "  --seed <int>            Seed in locked mode (default: -1, random per request)\n"
+            "  --position-temperature <f>  Position temperature in locked mode (default: 0)\n"
+            "  --class-temperature <f>     Class temperature in locked mode (default: 0)\n"
             "  --no-fa                 Disable flash attention\n"
+            "                          Flash attention is enabled by default\n"
             "  --clamp-fp16            Clamp hidden states to FP16 range\n",
             prog);
 }
@@ -104,10 +111,19 @@ int main(int argc, char ** argv) {
     const char *  codec_path = NULL;
     std::string   lang       = "None";
     server_config cfg;
-    bool          use_fa         = true;
-    bool          clamp_fp16     = false;
-    const char *  ref_audio_path = NULL;
-    const char *  ref_text_path  = NULL;
+    bool          use_fa                     = true;
+    bool          clamp_fp16                 = false;
+    bool          locked                     = false;
+    bool          steps_given                = false;
+    bool          seed_given                 = false;
+    bool          position_temperature_given = false;
+    bool          class_temperature_given    = false;
+    int           steps                      = 32;
+    int           seed                       = -1;
+    double        position_temperature       = 0.0;
+    double        class_temperature          = 0.0;
+    const char *  ref_audio_path             = NULL;
+    const char *  ref_text_path              = NULL;
 
     for (int i = 1; i < argc; i++) {
         const char * arg = argv[i];
@@ -125,6 +141,24 @@ int main(int argc, char ** argv) {
             ref_audio_path = argv[++i];
         } else if (!std::strcmp(arg, "--ref-text") && i + 1 < argc) {
             ref_text_path = argv[++i];
+        } else if (!std::strcmp(arg, "--locked")) {
+            locked = true;
+        } else if (!std::strcmp(arg, "--steps") && i + 1 < argc) {
+            steps_given = true;
+            steps       = std::atoi(argv[++i]);
+            if (steps < 1) {
+                fprintf(stderr, "[Server] FATAL: --steps must be >= 1\n");
+                return 1;
+            }
+        } else if (!std::strcmp(arg, "--seed") && i + 1 < argc) {
+            seed_given = true;
+            seed       = std::atoi(argv[++i]);
+        } else if (!std::strcmp(arg, "--position-temperature") && i + 1 < argc) {
+            position_temperature_given = true;
+            position_temperature       = std::strtod(argv[++i], NULL);
+        } else if (!std::strcmp(arg, "--class-temperature") && i + 1 < argc) {
+            class_temperature_given = true;
+            class_temperature       = std::strtod(argv[++i], NULL);
         } else if (!std::strcmp(arg, "--no-fa")) {
             use_fa = false;
         } else if (!std::strcmp(arg, "--clamp-fp16")) {
@@ -135,12 +169,28 @@ int main(int argc, char ** argv) {
         }
     }
 
+    if (!locked && (steps_given || seed_given || position_temperature_given || class_temperature_given)) {
+        fprintf(stderr, "[Server] FATAL: --steps/--seed/--position-temperature/--class-temperature require --locked\n");
+        return 1;
+    }
     if (!model_path || !codec_path) {
         print_usage(argv[0]);
         return 1;
     }
+    if (locked && (!ref_audio_path || !ref_text_path)) {
+        fprintf(stderr, "[Server] FATAL: --locked requires --ref-audio and --ref-text\n");
+        return 1;
+    }
     if (!ref_audio_path != !ref_text_path) {
         fprintf(stderr, "[Server] FATAL: --ref-audio and --ref-text must be given together\n");
+        return 1;
+    }
+    if (locked && (!std::isfinite(position_temperature) || position_temperature < 0.0)) {
+        fprintf(stderr, "[Server] FATAL: --position-temperature must be finite and >= 0\n");
+        return 1;
+    }
+    if (locked && (!std::isfinite(class_temperature) || class_temperature < 0.0)) {
+        fprintf(stderr, "[Server] FATAL: --class-temperature must be finite and >= 0\n");
         return 1;
     }
     if (ref_text_path) {
@@ -191,6 +241,44 @@ int main(int argc, char ** argv) {
 
     tts_backend be;
     be.model_id = basename_of(model_path);
+    be.locked   = locked;
+
+    if (locked && seed >= 0) {
+        const size_t code_bytes =
+            (size_t) g_default_voice.ref.num_codebooks * (size_t) g_default_voice.ref.ref_T * sizeof(int32_t);
+        std::string voice_data((const char *) g_default_voice.ref.ref_codes, code_bytes);
+        voice_data.append(g_default_voice.ref_text);
+        voice_data.append((const char *) &g_default_voice.ref.ref_T, sizeof(g_default_voice.ref.ref_T));
+        voice_data.append((const char *) &g_default_voice.ref.num_codebooks, sizeof(g_default_voice.ref.num_codebooks));
+        const uint64_t voice_hash = tts_fnv1a_64(voice_data.data(), voice_data.size());
+        char           voice_id[17];
+        char           parameters[192];
+        std::snprintf(voice_id, sizeof(voice_id), "%016llx", (unsigned long long) voice_hash);
+        std::snprintf(parameters, sizeof(parameters),
+                      "|seed=%d|steps=%d|position_temperature=%.9g|class_temperature=%.9g", seed, steps,
+                      position_temperature, class_temperature);
+        const std::string cache_suffix = "voice=" + std::string(voice_id) + "|lang=" + lang + parameters;
+        be.cache_key                   = [cache_suffix](const tts_request & req) {
+            std::string key = req.input;
+            key.push_back('\0');
+            key.append(cache_suffix);
+            return key;
+        };
+    }
+
+    if (locked) {
+        if (seed >= 0) {
+            fprintf(stderr,
+                    "[Server] locked: steps=%d seed=%d position_temperature=%.9g class_temperature=%.9g lang=%s "
+                    "cache=512 entries\n",
+                    steps, seed, position_temperature, class_temperature, lang.c_str());
+        } else {
+            fprintf(stderr,
+                    "[Server] locked: steps=%d seed=%d position_temperature=%.9g class_temperature=%.9g lang=%s "
+                    "cache=off (random seed)\n",
+                    steps, seed, position_temperature, class_temperature, lang.c_str());
+        }
+    }
 
     // A WAV payload is encoded server side through the single synthesis
     // context, so the extraction takes g_synth_mutex. An .rvq payload is
@@ -277,7 +365,37 @@ int main(int argc, char ** argv) {
     // pre-encoded reference ; an unknown name is rejected instead of
     // silently falling back to voice design. No name uses the startup
     // reference when one is loaded.
-    be.synthesize = [ov, &lang](const tts_request & req, const tts_sink & sink, std::string & err) -> int {
+    be.synthesize = [ov, &lang, locked, steps, seed, position_temperature, class_temperature](
+                        const tts_request & req, const tts_sink & sink, std::string & err) -> int {
+        if (locked) {
+            struct ov_tts_params p;
+            ov_tts_default_params(&p);
+            p.text                    = req.input.c_str();
+            p.lang                    = lang.c_str();
+            p.ref_audio_tokens        = g_default_voice.ref.ref_codes;
+            p.ref_T                   = g_default_voice.ref.ref_T;
+            p.ref_text                = g_default_voice.ref_text.c_str();
+            p.mg_seed                 = seed >= 0 ? (uint64_t) seed : (uint64_t) std::random_device{}();
+            p.mg_num_step             = steps;
+            p.mg_position_temperature = (float) position_temperature;
+            p.mg_class_temperature    = (float) class_temperature;
+
+            const tts_sink * sink_ptr = &sink;
+            p.on_chunk                = [](const float * s, int ns, void * u) -> bool {
+                return (*static_cast<const tts_sink *>(u))(s, ns);
+            };
+            p.on_chunk_user_data = (void *) sink_ptr;
+
+            struct ov_audio out = {};
+            enum ov_status  rc  = ov_synthesize(ov, &p, &out);
+            ov_audio_free(&out);
+            if (rc != OV_STATUS_OK) {
+                err = ov_last_error();
+                return (int) rc;
+            }
+            return 0;
+        }
+
         struct ov_tts_params p;
         ov_tts_default_params(&p);
         p.text = req.input.c_str();
