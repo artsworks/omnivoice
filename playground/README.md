@@ -1,18 +1,18 @@
 # Voice lock for pit wall radio
 
-These settings keep one speaker across every request, with no drift and no gender flips. f1-pitwall's [`speech.engine: omnivoice`](https://github.com/artsworks/f1-pitwall/blob/main/docs/getting-started.md#natural-voice-omnivoice-opt-in) gets them from `tts-server --locked`.
+These settings keep one speaker across every request, with no drift. f1-pitwall's [`speech.engine: omnivoice`](https://github.com/artsworks/f1-pitwall/blob/main/docs/getting-started.md#natural-voice-omnivoice-opt-in) gets them from `tts-server --locked`.
 
 ## What locks the voice
 
-The voice is locked when all three settings are in place:
+The voice is locked when all three are in place:
 
 - The reference clip. Start `tts-server` with `--ref-audio audio/reference-01.wav --ref-text audio/reference-01.txt`. A request without `voice` then clones that clip. A request with `voice` clones a voice registered over `POST /v1/audio/voices`.
 - Both sampler temperatures at 0. Send `"position_temperature": 0` and `"class_temperature": 0`. The MaskGIT decoder is then greedy and bit deterministic.
-- A fixed integer `seed`. It matters only when a temperature is above 0, and then keeps the request reproducible.
+- A fixed integer `seed`. It matters only above temperature 0, where it keeps the request reproducible.
 
 Do not send `instructions`. An instruct string pulls the voice away from the clip.
 
-Without `--ref-audio` or `voice`, the server runs voice design, which picks a new speaker for each request. This is the drift.
+Without `--ref-audio` or `voice`, the server runs voice design and picks a new speaker per request, which is the drift.
 
 ## Reference transcript
 
