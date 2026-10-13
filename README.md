@@ -1,8 +1,9 @@
 # omnivoice.cpp
 
-Local AI text-to-speech with voice cloning and voice design, powered
-by GGML. C++17 port of OmniVoice (k2-fsa/OmniVoice). 646 languages,
-24 kHz mono output, runs on CPU, CUDA, ROCm, Metal, Vulkan.
+Local AI text-to-speech with voice cloning and voice design, in C++17
+on GGML. 646 languages, 24 kHz mono output, runs on CPU, CUDA, ROCm,
+Metal, Vulkan. This checkout is tuned as the TTS backend for
+[f1-pitwall](https://github.com/artsworks/f1-pitwall).
 
 ## Features
 
@@ -22,8 +23,8 @@ by GGML. C++17 port of OmniVoice (k2-fsa/OmniVoice). 646 languages,
 ## Build
 
 ```
-git clone --recurse-submodules https://github.com/ServeurpersoCom/omnivoice.cpp.git
-cd omnivoice.cpp
+git clone --recurse-submodules https://github.com/artsworks/omnivoice.git
+cd omnivoice
 ./buildcuda.sh                   # NVIDIA GPU
 ./buildvulkan.sh                 # AMD/Intel GPU (Vulkan)
 ./buildcpu.sh                    # CPU only
@@ -35,7 +36,7 @@ NVCC_CCBIN=g++-13 ./buildcuda.sh # rolling release distros (Arch w/ GCC 16, etc.
 
 ## Model conversion
 
-Pre-converted GGUFs are available on Hugging Face :
+Pre-converted GGUFs are on Hugging Face :
 
   https://huggingface.co/Serveurperso/OmniVoice-GGUF
 
@@ -67,10 +68,10 @@ Voice cloning :
     --lang English -o out.wav < prompt.txt
 ```
 
-Pre-encoded reference (`clone.sh`): `omnivoice-codec` encodes a reference WAV
-into a compact `.rvq` latent (it applies the exact TTS reference
-preprocessing, so the codes are bit-identical to the `--ref-wav` path).
-Passing it via `--ref-rvq` skips the codec encode on every synthesis:
+Pre-encoded reference (`clone.sh`). `omnivoice-codec` encodes a reference
+WAV into a `.rvq` latent with the same preprocessing as `--ref-wav`, so the
+codes are bit-identical. `--ref-rvq` then skips the codec encode on every
+synthesis:
 
 ```
 build/omnivoice-codec --model models/omnivoice-tokenizer-F32.gguf -i ref.wav
@@ -81,13 +82,11 @@ build/omnivoice-tts \
     --lang English -o out.wav < prompt.txt
 ```
 
-OpenAI-compatible server (`server.sh`, `client.sh`) : `response_format`
-"pcm" streams s16le as it is generated, "wav" returns a one-shot file.
-Cloned voices register once over HTTP (a WAV encoded server side, or a
-`.rvq` from `omnivoice-codec`), stay resident in RAM and are then
-selected by name on every request, so a caller holds one voice per
-language across turns without touching the disk. `language` overrides
-the server default for a single request :
+OpenAI-compatible server (`server.sh`, `client.sh`). `response_format`
+"pcm" streams s16le as it is generated, and "wav" returns one file. A
+cloned voice registers once over HTTP as a WAV or a `.rvq`, stays in RAM
+and is selected by name per request. `language` overrides the server
+default per request :
 
 ```
 ./build/tts-server \
@@ -104,42 +103,44 @@ curl -X POST localhost:8080/v1/audio/speech -H "Content-Type: application/json" 
          "response_format":"wav","seed":42}' -o out.wav
 ```
 
-A `.rvq` payload must come from the same codec quantisation the server
-runs, otherwise the codes are read in the wrong space and the voice is
-not the expected one.
+A `.rvq` payload must come from the codec quantisation the server runs,
+or the voice comes out wrong.
+
+The server has no `-m`, `--tokenizer`, `-b` or `-fa` flag. Flash attention
+is on unless you pass `--no-fa`. `models.sh` downloads only the F32
+tokenizer. For Q8_0, run
+`hf download Serveurperso/OmniVoice-GGUF omnivoice-tokenizer-Q8_0.gguf --local-dir models`
+or
+`./build/quantize models/omnivoice-tokenizer-F32.gguf models/omnivoice-tokenizer-Q8_0.gguf Q8_0`.
+Do not use `./quantize.sh` for the tokenizer. It quantizes
+`omnivoice-base-F32.gguf` first, which `models.sh` does not download, and
+exits under `set -eu`. RVQ codebooks and their fc/fc2 projections stay F32
+in every variant.
 
 `--ref-audio ref.wav --ref-text ref.txt` sets a default voice. A request
 without `voice` then clones that clip instead of running voice design. The
-transcript must match the clip word for word. `position_temperature` and
-`class_temperature` override the MaskGIT sampler per request. Both at 0
-give bit deterministic output. See `playground/README.md` for the full
-voice lock.
+transcript must match the clip word for word. The request fields
+`position_temperature` and `class_temperature` override the MaskGIT
+sampler. Both at 0 give bit deterministic output.
 
-Use `--locked` with a reference clip and transcript to make the server own
-the voice, seed, steps, temperatures and language. Clients send only
-`input`. Every reply is mono s16 24 kHz `audio/wav`. Other request fields
-are ignored. The cache runs only when both temperatures are 0, because only
-then does the same text always give the same audio. The seed has no effect at
-temperatures 0. Above 0, a random seed gives different output each request.
-The LRU cache holds 512 entries and 128 MiB of WAV data.
+## Used by f1-pitwall
 
-The server has no `-m`, `--tokenizer`, `-b` or `-fa` flag. Use `--model`
-and `--codec`. Flash attention is on by default. Use `--no-fa` to disable
-it. `models.sh` downloads only the F32 tokenizer. Get the Q8_0 tokenizer
-from Hugging Face with
-`hf download Serveurperso/OmniVoice-GGUF omnivoice-tokenizer-Q8_0.gguf --local-dir models`,
-or run
-`./build/quantize models/omnivoice-tokenizer-F32.gguf models/omnivoice-tokenizer-Q8_0.gguf Q8_0`.
-Do not use `./quantize.sh` for the tokenizer. That script quantizes
-`omnivoice-base-F32.gguf` first, which `models.sh` does not download, and
-then exits because it uses `set -eu`. RVQ codebooks and their fc/fc2
-projections stay F32 in every variant.
+f1-pitwall calls `tts-server` over HTTP as its `omnivoice` speech engine.
+`omnivoice.service.cuda` runs it with `--locked`, a fixed `--ref-audio` and
+`--ref-text`, `--steps 8`, `--seed 0`, `--position-temperature 0` and
+`--class-temperature 0`. `omnivoice.service` is the unlocked unit.
+Clients send only `input` and get mono s16 24 kHz `audio/wav`. An LRU
+cache of 512 entries and 128 MiB serves repeated phrases, only when both
+temperatures are 0.
+
+`scripts/benchmark-pitwall.sh` times 20 pit wall lines and checks for a
+byte-identical cache hit. `playground/README.md` covers the voice lock.
 
 ## Embedding the library
 
-The CLI tools are thin wrappers over a public ABI. Single-header,
-single-name-prefix, plain C linkage so that C, C++, Python ctypes,
-Rust bindgen and Go cgo all consume it the same way.
+The CLI tools wrap a public ABI with one header, one name prefix and
+plain C linkage, so C, C++, Python ctypes, Rust bindgen and Go cgo use it
+the same way.
 
 ```c
 #include "omnivoice.h"
@@ -163,22 +164,20 @@ ov_audio_free(&audio);
 ov_free(ov);
 ```
 
-`tests/abi-c.c` is built with `-std=c99 -Wall -Werror -pedantic` on
-every build, so any regression that breaks plain C consumability fails
-the build, not just an opt-in target.
+Every build compiles `tests/abi-c.c` with `-std=c99 -Wall -Werror
+-pedantic`. `cmake -DOMNIVOICE_SHARED=ON ...` builds a shared library
+(libomnivoice.so / .dll / .dylib) that exports only the `ov_*` symbols.
 
-For a binding-friendly shared library (libomnivoice.so / .dll / .dylib),
-configure with `cmake -DOMNIVOICE_SHARED=ON ...`. The shared target
-exports only the `ov_*` symbols ; every internal `pipeline_*` and
-`backend_*` stays hidden inside the .so.
-
-See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the model, the
-GGUF layout, the inference pipeline, every CLI flag, the public API
-reference and the validation results.
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) covers the model, the GGUF
+layout, the inference pipeline, every CLI flag, the public API and the
+validation results.
 
 ## License
 
 MIT. See [LICENSE](LICENSE).
+
+Fork of [ServeurpersoCom/omnivoice.cpp](https://github.com/ServeurpersoCom/omnivoice.cpp),
+a C++17 port of OmniVoice.
 
 Upstream model : OmniVoice by Xiaomi / k2-fsa, Apache 2.0.
 Audio codec : Higgs Audio v2 (`bosonai/higgs-audio-v2-tokenizer`),
