@@ -729,12 +729,11 @@ codes plus a header carrying the sample rate and frame rate.
 
 ### tts-server
 
-OpenAI-compatible HTTP server over the public ABI, one GPU-resident
-context, synthesis serialized FIFO across connections. `src/tts-server.h`
-holds the HTTP core, `tools/tts-server.cpp` wires the `ov_*` ABI and the
-voice registry into it. Both response formats drive the streaming
-pipeline : pcm forwards each chunk to the socket as the codec produces
-it, wav collects them and emits a RIFF file. Verbatim `--help` :
+OpenAI-compatible HTTP server over the public ABI with one GPU-resident
+context. Synthesis runs FIFO across connections. `src/tts-server.h` holds
+the HTTP core, and `tools/tts-server.cpp` wires the `ov_*` ABI and the
+voice registry into it. Both response formats run the streaming pipeline.
+Verbatim `--help` :
 
 ```
 Usage: ./build/tts-server --model <gguf> --codec <gguf> [options]
@@ -759,24 +758,14 @@ Optional:
   --clamp-fp16            Clamp hidden states to FP16 range
 ```
 
-Use `--locked` with a reference clip and transcript to make the server own
-the voice, seed, steps, temperatures and language. Clients send only
-`input`. Every reply is mono s16 24 kHz `audio/wav`. Other request fields
-are ignored. The cache runs only when both temperatures are 0, because only
-then does the same text always give the same audio. The seed has no effect at
-temperatures 0. Above 0, a random seed gives different output each request.
-The LRU cache holds 512 entries and 128 MiB of WAV data.
+In locked mode the server reads only `input` and always returns mono s16
+24 kHz `audio/wav`. f1-pitwall runs this mode. It warms its
+phrases with `pitwall voice warm` and expects server-owned parameters, so
+every client gets the same cached audio. The LRU WAV cache holds 512
+entries and 128 MiB, and runs only when both temperatures are 0.
 
-The server has no `-m`, `--tokenizer`, `-b` or `-fa` flag. Use `--model`
-and `--codec`. Flash attention is on by default. Use `--no-fa` to disable
-it. `models.sh` downloads only the F32 tokenizer. Get the Q8_0 tokenizer
-from Hugging Face with
-`hf download Serveurperso/OmniVoice-GGUF omnivoice-tokenizer-Q8_0.gguf --local-dir models`,
-or run
-`./build/quantize models/omnivoice-tokenizer-F32.gguf models/omnivoice-tokenizer-Q8_0.gguf Q8_0`.
-Do not use `./quantize.sh` for the tokenizer. That script quantizes
-`omnivoice-base-F32.gguf` first, which `models.sh` does not download, and
-then exits because it uses `set -eu`. RVQ codebooks and their fc/fc2
+The server has no `-m`, `--tokenizer`, `-b` or `-fa` flag. The README
+covers the Q8_0 tokenizer download. RVQ codebooks and their fc/fc2
 projections stay F32 in every variant.
 
 Endpoints :
@@ -801,21 +790,20 @@ GET    /health                  liveness probe
 ```
 
 The model carries no speaker table, so every voice comes from the
-registry and a request without one runs voice design. Registered codes
-live in process RAM and feed `ref_audio_tokens`, which skips the codec
-encode on every turn. The two upload paths converge : a WAV encoded
-server side and the `.rvq` written by `omnivoice-codec` from the same
-clip produce bit-identical output, provided both use the same codec
-quantisation.
+registry or `--ref-audio`, and a request with neither runs voice design.
+Registered codes live in process RAM and feed `ref_audio_tokens`, which
+skips the codec encode on every turn. A WAV encoded server side and the
+`.rvq` from `omnivoice-codec` for the same clip give bit-identical output
+if both use the same codec quantisation.
 
 A WAV upload runs the codec on the single synthesis context and takes
 the synthesis mutex. The registry holds its own mutex and the synthesize
 path copies the codes out under it, so a concurrent replace or delete
 never frees a buffer a running synthesis still reads.
 
-Reference loudness does not survive the registry : `ov_voice_ref` carries
-codes only, so a registered voice always lands on the `ref_rms < 0`
-branch and gets peak normalisation rather than the reference level.
+Reference loudness does not survive the registry. `ov_voice_ref` carries
+codes only, so a registered voice takes the `ref_rms < 0` branch and gets
+peak normalisation instead of the reference level.
 
 ## Module map
 
