@@ -30,8 +30,10 @@
 #include <cstdint>
 #include <cstdio>
 #include <functional>
+#include <list>
 #include <mutex>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 // One synthesis request parsed from the OAI JSON body.
@@ -71,7 +73,13 @@ using tts_sink = std::function<bool(const float * samples, int n_samples)>;
 
 // Adapter implemented by each project tool.
 struct tts_backend {
-    std::string model_id;  // reported by GET /v1/models
+    std::string                                         model_id;  // reported by GET /v1/models
+    // Locked mode: every response is a one-shot WAV, whatever response_format says.
+    bool                                                locked = false;
+    // Locked mode with both temperatures 0: returns the full cache key for req (input plus
+    // every resolved synthesis parameter). Empty function = no cache.
+    std::function<std::string(const tts_request & req)> cache_key;
+
     // Run synthesis. When the request streams, the adapter routes the ABI
     // on_chunk to sink ; otherwise it pushes the whole buffer once. Returns
     // the ABI status (0 on success), and fills err with the ABI message on
@@ -94,6 +102,69 @@ struct server_config {
 // Single GPU context : synthesis is serialised FIFO across connections.
 static std::mutex        g_synth_mutex;
 static httplib::Server * g_svr = nullptr;
+
+static const size_t TTS_CACHE_MAX_ENTRIES = 512;
+static const size_t TTS_CACHE_MAX_BYTES   = 128 * 1024 * 1024;
+
+struct tts_wav_cache_entry {
+    std::string                   key;
+    std::string                   wav;
+    std::list<uint64_t>::iterator lru;
+};
+
+static std::mutex                                        g_tts_cache_mutex;
+static std::unordered_map<uint64_t, tts_wav_cache_entry> g_tts_wav_cache;
+static std::list<uint64_t>                               g_tts_cache_lru;
+static size_t                                            g_tts_cache_bytes = 0;
+
+static uint64_t tts_fnv1a_64(const void * data, size_t len) {
+    const uint8_t * bytes = static_cast<const uint8_t *>(data);
+    uint64_t        hash  = UINT64_C(14695981039346656037);
+    for (size_t i = 0; i < len; i++) {
+        hash ^= bytes[i];
+        hash *= UINT64_C(1099511628211);
+    }
+    return hash;
+}
+
+static bool tts_wav_cache_get(const std::string & key, std::string & wav) {
+    const uint64_t              hash = tts_fnv1a_64(key.data(), key.size());
+    std::lock_guard<std::mutex> lock(g_tts_cache_mutex);
+    auto                        it = g_tts_wav_cache.find(hash);
+    if (it == g_tts_wav_cache.end() || it->second.key != key) {
+        return false;
+    }
+    g_tts_cache_lru.splice(g_tts_cache_lru.begin(), g_tts_cache_lru, it->second.lru);
+    wav = it->second.wav;
+    return true;
+}
+
+static void tts_wav_cache_put(std::string key, std::string wav) {
+    if (wav.size() > TTS_CACHE_MAX_BYTES) {
+        return;
+    }
+
+    const uint64_t              hash = tts_fnv1a_64(key.data(), key.size());
+    std::lock_guard<std::mutex> lock(g_tts_cache_mutex);
+    auto                        it = g_tts_wav_cache.find(hash);
+    if (it != g_tts_wav_cache.end()) {
+        g_tts_cache_bytes -= it->second.wav.size();
+        g_tts_cache_lru.erase(it->second.lru);
+        g_tts_wav_cache.erase(it);
+    }
+    g_tts_cache_lru.push_front(hash);
+    tts_wav_cache_entry entry = { std::move(key), std::move(wav), g_tts_cache_lru.begin() };
+    g_tts_cache_bytes += entry.wav.size();
+    g_tts_wav_cache.emplace(hash, std::move(entry));
+
+    while (g_tts_wav_cache.size() > TTS_CACHE_MAX_ENTRIES || g_tts_cache_bytes > TTS_CACHE_MAX_BYTES) {
+        const uint64_t oldest    = g_tts_cache_lru.back();
+        auto           oldest_it = g_tts_wav_cache.find(oldest);
+        g_tts_cache_bytes -= oldest_it->second.wav.size();
+        g_tts_wav_cache.erase(oldest_it);
+        g_tts_cache_lru.pop_back();
+    }
+}
 
 static void tts_on_signal(int) {
     if (g_svr) {
@@ -225,8 +296,21 @@ static void tts_handle_speech(const tts_backend & be, const httplib::Request & h
         tts_json_error(res, 400, "invalid_request_error", err.c_str());
         return;
     }
+    if (be.locked) {
+        req.format = "wav";
+    }
 
     if (req.format == "wav") {
+        std::string cache_key;
+        if (be.cache_key) {
+            cache_key = be.cache_key(req);
+            std::string cached_wav;
+            if (tts_wav_cache_get(cache_key, cached_wav)) {
+                res.set_content(std::move(cached_wav), "audio/wav");
+                return;
+            }
+        }
+
         // One-shot : collect the whole utterance, then emit a RIFF file.
         std::vector<float> buf;
         tts_sink           sink = [&buf](const float * s, int n) {
@@ -234,17 +318,35 @@ static void tts_handle_speech(const tts_backend & be, const httplib::Request & h
             return true;
         };
         std::string synth_err;
-        int         rc;
+        std::string wav;
+        bool        cache_hit = false;
+        int         rc        = 0;
         {
             std::lock_guard<std::mutex> lock(g_synth_mutex);
-            rc = be.synthesize(req, sink, synth_err);
+            if (be.cache_key) {
+                // Requests for the same text can queue behind synthesis while the first fills the cache.
+                cache_hit = tts_wav_cache_get(cache_key, wav);
+            }
+            if (!cache_hit) {
+                rc = be.synthesize(req, sink, synth_err);
+                if (rc == 0 && be.cache_key) {
+                    wav = audio_encode_wav(buf.data(), (int) buf.size(), 24000, WAV_S16);
+                    tts_wav_cache_put(cache_key, wav);
+                }
+            }
+        }
+        if (cache_hit) {
+            res.set_content(std::move(wav), "audio/wav");
+            return;
         }
         if (rc != 0) {
             tts_json_error(res, tts_status_to_http(rc), "server_error",
                            synth_err.empty() ? "synthesis failed" : synth_err.c_str());
             return;
         }
-        std::string wav = audio_encode_wav(buf.data(), (int) buf.size(), 24000, WAV_S16);
+        if (!be.cache_key) {
+            wav = audio_encode_wav(buf.data(), (int) buf.size(), 24000, WAV_S16);
+        }
         res.set_content(std::move(wav), "audio/wav");
         return;
     }

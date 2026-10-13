@@ -115,6 +115,26 @@ transcript must match the clip word for word. `position_temperature` and
 give bit deterministic output. See `playground/README.md` for the full
 voice lock.
 
+Use `--locked` with a reference clip and transcript to make the server own
+the voice, seed, steps, temperatures and language. Clients send only
+`input`. Every reply is mono s16 24 kHz `audio/wav`. Other request fields
+are ignored. The cache runs only when both temperatures are 0, because only
+then does the same text always give the same audio. The seed has no effect at
+temperatures 0. Above 0, a random seed gives different output each request.
+The LRU cache holds 512 entries and 128 MiB of WAV data.
+
+The server has no `-m`, `--tokenizer`, `-b` or `-fa` flag. Use `--model`
+and `--codec`. Flash attention is on by default. Use `--no-fa` to disable
+it. `models.sh` downloads only the F32 tokenizer. Get the Q8_0 tokenizer
+from Hugging Face with
+`hf download Serveurperso/OmniVoice-GGUF omnivoice-tokenizer-Q8_0.gguf --local-dir models`,
+or run
+`./build/quantize models/omnivoice-tokenizer-F32.gguf models/omnivoice-tokenizer-Q8_0.gguf Q8_0`.
+Do not use `./quantize.sh` for the tokenizer. That script quantizes
+`omnivoice-base-F32.gguf` first, which `models.sh` does not download, and
+then exits because it uses `set -eu`. RVQ codebooks and their fc/fc2
+projections stay F32 in every variant.
+
 ## Embedding the library
 
 The CLI tools are thin wrappers over a public ABI. Single-header,

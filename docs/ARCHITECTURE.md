@@ -747,9 +747,37 @@ Optional:
   --host <ip>             Listen address (default: 127.0.0.1)
   --port <n>              Listen port (default: 8080)
   --lang <str>            Language label when a request omits one (default 'None')
+  --ref-audio <wav>       Reference clip, the default voice for requests without 'voice'
+  --ref-text <path>       Transcript file for --ref-audio (required with it, verbatim)
+  --locked                Use server-owned synthesis parameters and WAV output
+  --steps <int>           MaskGIT steps in locked mode (default: 32)
+  --seed <int>            Seed in locked mode (default: -1 random, used only when a temperature > 0)
+  --position-temperature <f>  Position temperature in locked mode (default: 0)
+  --class-temperature <f>     Class temperature in locked mode (default: 0)
   --no-fa                 Disable flash attention
+                          Flash attention is enabled by default
   --clamp-fp16            Clamp hidden states to FP16 range
 ```
+
+Use `--locked` with a reference clip and transcript to make the server own
+the voice, seed, steps, temperatures and language. Clients send only
+`input`. Every reply is mono s16 24 kHz `audio/wav`. Other request fields
+are ignored. The cache runs only when both temperatures are 0, because only
+then does the same text always give the same audio. The seed has no effect at
+temperatures 0. Above 0, a random seed gives different output each request.
+The LRU cache holds 512 entries and 128 MiB of WAV data.
+
+The server has no `-m`, `--tokenizer`, `-b` or `-fa` flag. Use `--model`
+and `--codec`. Flash attention is on by default. Use `--no-fa` to disable
+it. `models.sh` downloads only the F32 tokenizer. Get the Q8_0 tokenizer
+from Hugging Face with
+`hf download Serveurperso/OmniVoice-GGUF omnivoice-tokenizer-Q8_0.gguf --local-dir models`,
+or run
+`./build/quantize models/omnivoice-tokenizer-F32.gguf models/omnivoice-tokenizer-Q8_0.gguf Q8_0`.
+Do not use `./quantize.sh` for the tokenizer. That script quantizes
+`omnivoice-base-F32.gguf` first, which `models.sh` does not download, and
+then exits because it uses `set -eu`. RVQ codebooks and their fc/fc2
+projections stay F32 in every variant.
 
 Endpoints :
 
