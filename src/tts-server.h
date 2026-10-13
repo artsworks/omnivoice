@@ -76,7 +76,7 @@ struct tts_backend {
     std::string                                         model_id;  // reported by GET /v1/models
     // Locked mode: every response is a one-shot WAV, whatever response_format says.
     bool                                                locked = false;
-    // Locked mode with a pinned seed: returns the full cache key for req (input plus
+    // Locked mode with both temperatures 0: returns the full cache key for req (input plus
     // every resolved synthesis parameter). Empty function = no cache.
     std::function<std::string(const tts_request & req)> cache_key;
 

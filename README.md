@@ -118,10 +118,10 @@ voice lock.
 Use `--locked` with a reference clip and transcript to make the server own
 the voice, seed, steps, temperatures and language. Clients send only
 `input`. Every reply is mono s16 24 kHz `audio/wav`. Other request fields
-are ignored. The cache runs only with `--seed >= 0`. A random seed gives
-each request different output when a temperature is above 0. The LRU cache holds 512 entries and 128 MiB
-of WAV data. The seed only changes output when a temperature is above 0. At
-both temperatures 0, output is the same for any seed.
+are ignored. The cache runs only when both temperatures are 0, because only
+then does the same text always give the same audio. The seed has no effect at
+temperatures 0. Above 0, a random seed gives different output each request.
+The LRU cache holds 512 entries and 128 MiB of WAV data.
 
 The server has no `-m`, `--tokenizer`, `-b` or `-fa` flag. Use `--model`
 and `--codec`. Flash attention is on by default. Use `--no-fa` to disable

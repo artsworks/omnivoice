@@ -283,7 +283,7 @@ int main(int argc, char ** argv) {
     be.model_id = basename_of(model_path);
     be.locked   = locked;
 
-    if (locked && seed >= 0) {
+    if (locked && position_temperature == 0.0 && class_temperature == 0.0) {
         const size_t code_bytes =
             (size_t) g_default_voice.ref.num_codebooks * (size_t) g_default_voice.ref.ref_T * sizeof(int32_t);
         std::string voice_data((const char *) g_default_voice.ref.ref_codes, code_bytes);
@@ -307,17 +307,15 @@ int main(int argc, char ** argv) {
     }
 
     if (locked) {
-        if (seed >= 0) {
-            fprintf(stderr,
-                    "[Server] locked: steps=%d seed=%d position_temperature=%.9g class_temperature=%.9g lang=%s "
-                    "cache=512 entries\n",
-                    steps, seed, position_temperature, class_temperature, lang.c_str());
+        char cache_status[64];
+        if (position_temperature == 0.0 && class_temperature == 0.0) {
+            snprintf(cache_status, sizeof(cache_status), "cache=%zu entries", (size_t) TTS_CACHE_MAX_ENTRIES);
         } else {
-            fprintf(stderr,
-                    "[Server] locked: steps=%d seed=%d position_temperature=%.9g class_temperature=%.9g lang=%s "
-                    "cache=off (random seed)\n",
-                    steps, seed, position_temperature, class_temperature, lang.c_str());
+            snprintf(cache_status, sizeof(cache_status), "cache=off (temperature > 0)");
         }
+        fprintf(stderr,
+                "[Server] locked: steps=%d seed=%d position_temperature=%.9g class_temperature=%.9g lang=%s %s\n",
+                steps, seed, position_temperature, class_temperature, lang.c_str(), cache_status);
     }
 
     // A WAV payload is encoded server side through the single synthesis
