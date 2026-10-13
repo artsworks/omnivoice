@@ -762,7 +762,7 @@ Optional:
 Use `--locked` with a reference clip and transcript to make the server own
 the voice, seed, steps, temperatures and language. Clients send only
 `input`. Every reply is mono s16 24 kHz `audio/wav`. Other request fields
-are ignored. The cache runs only with `--seed >= 0`; a random seed gives
+are ignored. The cache runs only with `--seed >= 0`. A random seed gives
 each request different output. The LRU cache holds 512 entries and 128 MiB
 of WAV data.
 

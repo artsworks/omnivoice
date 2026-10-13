@@ -1,5 +1,5 @@
-# The Q8_0 tokenizer is not fetched by models.sh. Download it with the hf command in README.md first.
 # ~/.config/systemd/user/omnivoice.service
+# The Q8_0 tokenizer is not fetched by models.sh. Download it with the hf command in README.md first.
 
 [Unit]
 Description=OmniVoice Persistent TTS Server
