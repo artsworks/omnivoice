@@ -6,7 +6,7 @@ These settings keep one speaker across every request, with no drift. f1-pitwall'
 
 The voice is locked when all three are in place:
 
-- The reference clip. Start `tts-server` with `--ref-audio audio/reference-01.wav --ref-text audio/reference-01.txt`. A request without `voice` then clones that clip. A request with `voice` clones a voice registered over `POST /v1/audio/voices`.
+- The reference clip. Start `tts-server` with `--ref-audio audio/reference-01.wav --ref-text audio/reference-01.txt`. A request without `voice` clones that clip. A request with `voice` clones a voice registered over `POST /v1/audio/voices`.
 - Both sampler temperatures at 0. Send `"position_temperature": 0` and `"class_temperature": 0`. The MaskGIT decoder is then greedy and bit deterministic.
 - A fixed integer `seed`. It matters only above temperature 0, where it keeps the request reproducible.
 
