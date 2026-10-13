@@ -318,19 +318,34 @@ static void tts_handle_speech(const tts_backend & be, const httplib::Request & h
             return true;
         };
         std::string synth_err;
-        int         rc;
+        std::string wav;
+        bool        cache_hit = false;
+        int         rc        = 0;
         {
             std::lock_guard<std::mutex> lock(g_synth_mutex);
-            rc = be.synthesize(req, sink, synth_err);
+            if (be.cache_key) {
+                // Requests for the same text can queue behind synthesis while the first fills the cache.
+                cache_hit = tts_wav_cache_get(cache_key, wav);
+            }
+            if (!cache_hit) {
+                rc = be.synthesize(req, sink, synth_err);
+                if (rc == 0 && be.cache_key) {
+                    wav = audio_encode_wav(buf.data(), (int) buf.size(), 24000, WAV_S16);
+                    tts_wav_cache_put(cache_key, wav);
+                }
+            }
+        }
+        if (cache_hit) {
+            res.set_content(std::move(wav), "audio/wav");
+            return;
         }
         if (rc != 0) {
             tts_json_error(res, tts_status_to_http(rc), "server_error",
                            synth_err.empty() ? "synthesis failed" : synth_err.c_str());
             return;
         }
-        std::string wav = audio_encode_wav(buf.data(), (int) buf.size(), 24000, WAV_S16);
-        if (be.cache_key) {
-            tts_wav_cache_put(std::move(cache_key), wav);
+        if (!be.cache_key) {
+            wav = audio_encode_wav(buf.data(), (int) buf.size(), 24000, WAV_S16);
         }
         res.set_content(std::move(wav), "audio/wav");
         return;

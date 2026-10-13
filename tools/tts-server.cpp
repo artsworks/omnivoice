@@ -15,6 +15,8 @@
 #include "utf8.h"
 #include "version.h"
 
+#include <cerrno>
+#include <climits>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -63,7 +65,7 @@ static void print_usage(const char * prog) {
             "  --ref-text <path>       Transcript file for --ref-audio (required with it, verbatim)\n"
             "  --locked                Use server-owned synthesis parameters and WAV output\n"
             "  --steps <int>           MaskGIT steps in locked mode (default: 32)\n"
-            "  --seed <int>            Seed in locked mode (default: -1, random per request)\n"
+            "  --seed <int>            Seed in locked mode (default: -1 random, used only when a temperature > 0)\n"
             "  --position-temperature <f>  Position temperature in locked mode (default: 0)\n"
             "  --class-temperature <f>     Class temperature in locked mode (default: 0)\n"
             "  --no-fa                 Disable flash attention\n"
@@ -96,6 +98,28 @@ static bool read_text_file(const char * path, std::string & out) {
     while (!out.empty() && (out.back() == '\n' || out.back() == '\r')) {
         out.pop_back();
     }
+    return true;
+}
+
+static bool parse_int_arg(const char * s, int & out) {
+    errno = 0;
+    char * end;
+    long   value = std::strtol(s, &end, 10);
+    if (end == s || *end != '\0' || errno == ERANGE || value < INT_MIN || value > INT_MAX) {
+        return false;
+    }
+    out = (int) value;
+    return true;
+}
+
+static bool parse_float_arg(const char * s, double & out) {
+    errno = 0;
+    char * end;
+    double value = std::strtod(s, &end);
+    if (end == s || *end != '\0' || errno == ERANGE || !std::isfinite(value)) {
+        return false;
+    }
+    out = value;
     return true;
 }
 
@@ -144,21 +168,37 @@ int main(int argc, char ** argv) {
         } else if (!std::strcmp(arg, "--locked")) {
             locked = true;
         } else if (!std::strcmp(arg, "--steps") && i + 1 < argc) {
+            const char * value = argv[++i];
+            if (!parse_int_arg(value, steps)) {
+                fprintf(stderr, "[Server] FATAL: --steps expects an integer, got '%s'\n", value);
+                return 1;
+            }
             steps_given = true;
-            steps       = std::atoi(argv[++i]);
             if (steps < 1) {
                 fprintf(stderr, "[Server] FATAL: --steps must be >= 1\n");
                 return 1;
             }
         } else if (!std::strcmp(arg, "--seed") && i + 1 < argc) {
+            const char * value = argv[++i];
+            if (!parse_int_arg(value, seed)) {
+                fprintf(stderr, "[Server] FATAL: --seed expects an integer, got '%s'\n", value);
+                return 1;
+            }
             seed_given = true;
-            seed       = std::atoi(argv[++i]);
         } else if (!std::strcmp(arg, "--position-temperature") && i + 1 < argc) {
+            const char * value = argv[++i];
+            if (!parse_float_arg(value, position_temperature)) {
+                fprintf(stderr, "[Server] FATAL: --position-temperature expects a number, got '%s'\n", value);
+                return 1;
+            }
             position_temperature_given = true;
-            position_temperature       = std::strtod(argv[++i], NULL);
         } else if (!std::strcmp(arg, "--class-temperature") && i + 1 < argc) {
+            const char * value = argv[++i];
+            if (!parse_float_arg(value, class_temperature)) {
+                fprintf(stderr, "[Server] FATAL: --class-temperature expects a number, got '%s'\n", value);
+                return 1;
+            }
             class_temperature_given = true;
-            class_temperature       = std::strtod(argv[++i], NULL);
         } else if (!std::strcmp(arg, "--no-fa")) {
             use_fa = false;
         } else if (!std::strcmp(arg, "--clamp-fp16")) {
