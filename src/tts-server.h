@@ -565,8 +565,10 @@ static int tts_server_run(const tts_backend & be, const server_config & cfg) {
         { "Access-Control-Allow-Origin", "*" }
     });
     svr.Options("/.*", [](const httplib::Request &, httplib::Response & res) {
+        res.status = 204;
         res.set_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
-        res.set_header("Access-Control-Allow-Headers", "Content-Type");
+        res.set_header("Access-Control-Allow-Headers", "Content-Type, Authorization");
+        res.set_header("Access-Control-Max-Age", "86400");
     });
 
     svr.Post("/v1/audio/speech",
