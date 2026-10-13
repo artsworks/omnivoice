@@ -136,6 +136,15 @@ temperatures are 0.
 `scripts/benchmark-pitwall.sh` times 20 pit wall lines and checks for a
 byte-identical cache hit. `playground/README.md` covers the voice lock.
 
+`scripts/sweep-voices.sh` makes voice design candidates for a new
+`--ref-audio` and `--ref-text`. It starts a temporary unlocked `tts-server`
+on a spare port, 8081 unless the first argument sets another, so the locked
+service keeps running. It sweeps accent, pitch and seeds over a fixed pit
+wall prompt and writes `voice_*_seed_*.wav` files to `candidate_voices/`.
+The prompt becomes the `ref_text`, so keep it verbatim. The server runs
+on `CUDA0`, and both servers load the model into VRAM. If the GPU cannot
+fit both, stop the service first.
+
 ## Embedding the library
 
 The CLI tools wrap a public ABI with one header, one name prefix and

@@ -11,6 +11,7 @@ __pycache__/
 # Model weights and audio outputs
 models/*.gguf
 bench_outputs/
+candidate_voices/
 *.wav
 
 # Build directory and Python virtual environment
