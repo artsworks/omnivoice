@@ -63,7 +63,7 @@ static void print_usage(const char * prog) {
             "  --lang <str>            Language label when a request omits one (default 'None')\n"
             "  --ref-audio <wav>       Reference clip, the default voice for requests without 'voice'\n"
             "  --ref-text <path>       Transcript file for --ref-audio (required with it, verbatim)\n"
-            "  --locked                Use server-owned synthesis parameters and WAV output\n"
+            "  --locked                Use server-owned synthesis parameters, WAV output by default\n"
             "  --steps <int>           MaskGIT steps in locked mode (default: 32)\n"
             "  --seed <int>            Seed in locked mode (default: -1 random, used only when a temperature > 0)\n"
             "  --position-temperature <f>  Position temperature in locked mode (default: 0)\n"

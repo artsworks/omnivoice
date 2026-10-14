@@ -1,9 +1,8 @@
 # omnivoice.cpp
 
 Local text-to-speech with voice cloning and voice design, in C++17 on
-GGML. It speaks 646 languages, outputs 24 kHz mono and runs on CPU, CUDA,
-ROCm, Metal and Vulkan. This fork is the TTS backend for
-[f1-pitwall](https://github.com/artsworks/f1-pitwall).
+GGML. This fork targets Linux with an NVIDIA GPU (CUDA) for the
+[f1-pitwall](https://github.com/artsworks/f1-pitwall) deployment.
 
 ## Features
 
@@ -25,12 +24,11 @@ ROCm, Metal and Vulkan. This fork is the TTS backend for
 ```
 git clone --recurse-submodules https://github.com/artsworks/omnivoice.git
 cd omnivoice
-./buildcuda.sh                   # NVIDIA GPU
-./buildvulkan.sh                 # AMD/Intel GPU (Vulkan)
-./buildcpu.sh                    # CPU only
-./buildall.sh                    # all backends, runtime DL loading
+./buildcuda.sh                   # sm_75, RTX 2060
 NVCC_CCBIN=g++-13 ./buildcuda.sh # rolling release distros (Arch with GCC 16)
 ```
+
+`buildcuda.sh` targets `sm_75` for an RTX 2060. Edit `CMAKE_CUDA_ARCHITECTURES` in that script for other cards.
 
 `-DGGML_SOURCE_DIR=<path>` swaps the ggml submodule for another tree (upstream ggml, llama.cpp/ggml).
 
@@ -128,9 +126,10 @@ f1-pitwall calls `tts-server` over HTTP as its `omnivoice` speech engine.
 `omnivoice.service.cuda` runs it with `--locked`, a fixed `--ref-audio` and
 `--ref-text`, `--steps 8`, `--seed 0`, `--position-temperature 0` and
 `--class-temperature 0`. `omnivoice.service` is the unlocked unit.
-Clients send only `input` and get mono s16 24 kHz `audio/wav`. If both
-temperatures are 0, an LRU cache of 512 entries and 128 MiB serves
-repeated phrases.
+Clients send only `input` and get mono s16 24 kHz `audio/wav` by default.
+Setting `response_format` to `pcm` streams the same audio and fills the WAV
+cache. If both temperatures are 0, an LRU cache of 512 entries and 128 MiB
+serves repeated phrases.
 
 `scripts/benchmark-pitwall.sh` times 20 pit wall lines and checks for a
 byte-identical cache hit. `playground/README.md` covers the voice lock.
