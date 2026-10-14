@@ -41,9 +41,6 @@ Single public checkpoint : `k2-fsa/OmniVoice` (3.1 GB).
 git clone --recurse-submodules https://github.com/ServeurpersoCom/omnivoice.cpp.git
 cd omnivoice.cpp
 ./buildcuda.sh      # NVIDIA GPU
-./buildvulkan.sh    # AMD/Intel GPU (Vulkan)
-./buildcpu.sh       # CPU only
-./buildall.sh       # all backends, runtime DL loading
 ```
 
 The GGML submodule lives at `https://github.com/ServeurpersoCom/ggml.git`
@@ -748,7 +745,7 @@ Optional:
   --lang <str>            Language label when a request omits one (default 'None')
   --ref-audio <wav>       Reference clip, the default voice for requests without 'voice'
   --ref-text <path>       Transcript file for --ref-audio (required with it, verbatim)
-  --locked                Use server-owned synthesis parameters and WAV output
+  --locked                Use server-owned synthesis parameters, WAV output by default
   --steps <int>           MaskGIT steps in locked mode (default: 32)
   --seed <int>            Seed in locked mode (default: -1 random, used only when a temperature > 0)
   --position-temperature <f>  Position temperature in locked mode (default: 0)
@@ -758,11 +755,10 @@ Optional:
   --clamp-fp16            Clamp hidden states to FP16 range
 ```
 
-In locked mode the server reads only `input` and always returns mono s16
-24 kHz `audio/wav`. f1-pitwall runs this mode. It warms its
-phrases with `pitwall voice warm` and expects server-owned parameters, so
-every client gets the same cached audio. The LRU WAV cache holds 512
-entries and 128 MiB, and runs only when both temperatures are 0.
+Locked mode reads only `input` and `response_format`. WAV is the default.
+A PCM stream fills the same WAV cache. f1-pitwall runs this mode and warms
+phrases with `pitwall voice warm`. The LRU cache holds 512 entries and
+128 MiB. It runs only when both temperatures are 0.
 
 The server has no `-m`, `--tokenizer`, `-b` or `-fa` flag. The README
 covers the Q8_0 tokenizer download. RVQ codebooks and their fc/fc2

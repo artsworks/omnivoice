@@ -19,7 +19,7 @@
 //
 // Audio out: response_format "pcm" streams s16le 24 kHz mono chunked as it
 // is generated (real time), "wav" returns a one-shot RIFF file. pcm is the
-// default so streaming is on unless the client asks for a file.
+// default except under --locked, where wav is the default.
 
 #include "../vendor/cpp-httplib/httplib.h"
 #include "audio-io.h"
@@ -42,7 +42,7 @@ struct tts_request {
     std::string lang;          // language label, empty keeps the server default
     std::string voice;         // registered voice name, empty uses the startup reference (or voice design)
     std::string instructions;  // OAI instructions, mapped to the ABI instruct field
-    std::string format;        // "pcm" (stream) or "wav" (one-shot)
+    std::string format;        // empty (mode default), "pcm" (stream) or "wav" (one-shot)
 
     // Optional sampling seed. Negative or absent draws a hardware
     // random seed per request, matching the CLI convention; anything
@@ -74,7 +74,7 @@ using tts_sink = std::function<bool(const float * samples, int n_samples)>;
 // Adapter implemented by each project tool.
 struct tts_backend {
     std::string                                         model_id;  // reported by GET /v1/models
-    // Locked mode: every response is a one-shot WAV, whatever response_format says.
+    // Locked mode uses server-owned parameters. WAV is the default; explicit PCM streams.
     bool                                                locked = false;
     // Locked mode with both temperatures 0: returns the full cache key for req (input plus
     // every resolved synthesis parameter). Empty function = no cache.
@@ -172,10 +172,9 @@ static void tts_on_signal(int) {
     }
 }
 
-// Clamp to [-1, 1] and scale to s16. lrintf rounds to nearest, ties to even.
+// Same conversion as audio_encode_wav_s16, so PCM and WAV bytes match.
 static inline int16_t tts_f32_to_s16(float x) {
-    float v = x < -1.0f ? -1.0f : (x > 1.0f ? 1.0f : x);
-    return (int16_t) lrintf(v * 32767.0f);
+    return (int16_t) (wav_clamp1(wav_sanitize(x)) * 32767.0f);
 }
 
 // Append a mono f32 block as s16le bytes onto out.
@@ -240,7 +239,7 @@ static bool tts_parse_request(const std::string & body, tts_request & req, std::
     req.instructions          = yyjson_is_str(instructions) ? yyjson_get_str(instructions) : "";
 
     yyjson_val * fmt = yyjson_obj_get(root, "response_format");
-    req.format       = yyjson_is_str(fmt) ? yyjson_get_str(fmt) : "pcm";
+    req.format       = yyjson_is_str(fmt) ? yyjson_get_str(fmt) : "";
 
     yyjson_val * seed = yyjson_obj_get(root, "seed");
     if (seed && !yyjson_is_int(seed)) {
@@ -269,8 +268,8 @@ static bool tts_parse_request(const std::string & body, tts_request & req, std::
 
     yyjson_doc_free(doc);
 
-    if (req.format != "pcm" && req.format != "wav") {
-        err = "response_format must be 'pcm' or 'wav'";
+    if (req.format != "" && req.format != "pcm" && req.format != "wav") {
+        err = "response_format must be absent, 'pcm' or 'wav'";
         return false;
     }
     return true;
@@ -296,8 +295,8 @@ static void tts_handle_speech(const tts_backend & be, const httplib::Request & h
         tts_json_error(res, 400, "invalid_request_error", err.c_str());
         return;
     }
-    if (be.locked) {
-        req.format = "wav";
+    if (req.format.empty()) {
+        req.format = be.locked ? "wav" : "pcm";
     }
 
     if (req.format == "wav") {
@@ -357,20 +356,39 @@ static void tts_handle_speech(const tts_backend & be, const httplib::Request & h
     // frees the GPU instead of finishing a stream nobody reads.
     res.set_header("Cache-Control", "no-cache");
     res.set_header("X-Accel-Buffering", "no");
-    res.set_chunked_content_provider("audio/pcm", [&be, req](size_t, httplib::DataSink & sink) mutable -> bool {
-        tts_sink push = [&sink](const float * s, int n) {
-            std::string bytes;
-            tts_append_s16le(bytes, s, n);
-            return sink.write(bytes.data(), bytes.size());
-        };
-        std::string synth_err;
-        {
-            std::lock_guard<std::mutex> lock(g_synth_mutex);
-            be.synthesize(req, push, synth_err);
-        }
-        sink.done();
-        return true;
-    });
+    std::string cache_key;
+    if (be.cache_key) {
+        cache_key = be.cache_key(req);
+    }
+
+    res.set_chunked_content_provider(
+        "audio/pcm", [&be, req, cache_key](size_t, httplib::DataSink & sink) mutable -> bool {
+            std::vector<float> buf;
+            bool               keep = static_cast<bool>(be.cache_key);
+            tts_sink           push = [&sink, &buf, &keep](const float * s, int n) {
+                if (keep) {
+                    if ((buf.size() + (size_t) n) * 2 + 44 > TTS_CACHE_MAX_BYTES) {
+                        keep = false;
+                        std::vector<float>().swap(buf);
+                    } else {
+                        buf.insert(buf.end(), s, s + n);
+                    }
+                }
+                std::string bytes;
+                tts_append_s16le(bytes, s, n);
+                return sink.write(bytes.data(), bytes.size());
+            };
+            std::string synth_err;
+            {
+                std::lock_guard<std::mutex> lock(g_synth_mutex);
+                int                         rc = be.synthesize(req, push, synth_err);
+                if (rc == 0 && keep) {
+                    tts_wav_cache_put(cache_key, audio_encode_wav(buf.data(), (int) buf.size(), 24000, WAV_S16));
+                }
+            }
+            sink.done();
+            return true;
+        });
 }
 
 // Decode standard base64 (with optional padding) into out. Returns false

@@ -5,8 +5,9 @@
 # /health, sends every line over HTTP and stops the server on exit. The model
 # stays loaded across all 20 calls.
 #
-# The server is locked. It owns the seed, steps, temperatures, voice,
-# language and response format. Requests send only input.
+# The server is locked. It owns the seed, steps, temperatures, voice and
+# language, and sets the default response format. A PCM check verifies that
+# streaming fills the WAV cache.
 #
 # The server runs 8 MaskGIT steps. The old CLI benchmark used --steps 14
 # and the server default is 32, so timings are not comparable.
@@ -184,6 +185,47 @@ if cmp -s "$OUTPUT_DIR/call_repeat.wav" "$OUTPUT_DIR/call_1.wav"; then
     echo "Repeat of line 1 (cache hit): ${repeat_duration}s, identical audio: yes"
 else
     echo "Repeat of line 1 (cache hit): ${repeat_duration}s, identical audio: no"
+    exit 1
+fi
+
+stream_line="Streamed check, box box."
+stream_body=$(jq -cn --arg input "$stream_line" '{input: $input, response_format: "pcm"}')
+pcm_start=$(date +%s%N)
+curl -s -o "$OUTPUT_DIR/call_stream.pcm" -w "%{http_code}" -X POST "http://$HOST:$PORT/v1/audio/speech" \
+    -H "Content-Type: application/json" -d "$stream_body" >"$OUTPUT_DIR/.stream-pcm-status" &
+wait $!
+pcm_end=$(date +%s%N)
+pcm_status=$(cat "$OUTPUT_DIR/.stream-pcm-status")
+if [ "$pcm_status" != "200" ]; then
+    echo "PCM stream failed with HTTP $pcm_status: $(cat "$OUTPUT_DIR/call_stream.pcm")"
+    exit 1
+fi
+if [ ! -s "$OUTPUT_DIR/call_stream.pcm" ]; then
+    echo "PCM stream returned an empty body"
+    exit 1
+fi
+pcm_duration=$(echo "scale=3; ($pcm_end - $pcm_start) / 1000000000" | bc)
+
+wav_body=$(jq -cn --arg input "$stream_line" '{input: $input}')
+wav_start=$(date +%s%N)
+curl -s -o "$OUTPUT_DIR/call_stream.wav" -w "%{http_code}" -X POST "http://$HOST:$PORT/v1/audio/speech" \
+    -H "Content-Type: application/json" -d "$wav_body" >"$OUTPUT_DIR/.stream-wav-status" &
+wait $!
+wav_end=$(date +%s%N)
+wav_status=$(cat "$OUTPUT_DIR/.stream-wav-status")
+if [ "$wav_status" != "200" ]; then
+    echo "WAV request after PCM stream failed with HTTP $wav_status: $(cat "$OUTPUT_DIR/call_stream.wav")"
+    exit 1
+fi
+wav_duration=$(echo "scale=3; ($wav_end - $wav_start) / 1000000000" | bc)
+if cmp -s "$OUTPUT_DIR/call_stream.pcm" <(tail -c +45 "$OUTPUT_DIR/call_stream.wav"); then
+    identical_audio=yes
+else
+    identical_audio=no
+fi
+echo "Wav after pcm stream (cache hit): ${wav_duration}s, stream ${pcm_duration}s, identical audio: ${identical_audio}"
+if [ "$identical_audio" != yes ] || (( (wav_end - wav_start) * 2 >= pcm_end - pcm_start )); then
+    echo "WAV request did not confirm a byte-identical PCM-filled cache hit"
     exit 1
 fi
 
