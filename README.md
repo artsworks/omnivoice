@@ -24,7 +24,7 @@ GGML. This fork targets Linux with an NVIDIA GPU (CUDA) for the
 ```
 git clone --recurse-submodules https://github.com/artsworks/omnivoice.git
 cd omnivoice
-./buildcuda.sh                   # sm_75, RTX 2060
+./buildcuda.sh                   # NVIDIA GPU
 NVCC_CCBIN=g++-13 ./buildcuda.sh # rolling release distros (Arch with GCC 16)
 ```
 
