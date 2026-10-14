@@ -218,16 +218,14 @@ if [ "$wav_status" != "200" ]; then
     exit 1
 fi
 wav_duration=$(echo "scale=3; ($wav_end - $wav_start) / 1000000000" | bc)
-pcm_size=$(stat -c %s "$OUTPUT_DIR/call_stream.pcm")
-wav_size=$(($(stat -c %s "$OUTPUT_DIR/call_stream.wav") - 44))
-if [ "$wav_size" -eq "$pcm_size" ]; then
-    same_length=yes
+if cmp -s "$OUTPUT_DIR/call_stream.pcm" <(tail -c +45 "$OUTPUT_DIR/call_stream.wav"); then
+    identical_audio=yes
 else
-    same_length=no
+    identical_audio=no
 fi
-echo "Wav after pcm stream (cache hit): ${wav_duration}s, stream ${pcm_duration}s, same length: ${same_length}"
-if [ "$same_length" != yes ] || (( (wav_end - wav_start) * 2 >= pcm_end - pcm_start )); then
-    echo "WAV request did not confirm a PCM-filled cache hit"
+echo "Wav after pcm stream (cache hit): ${wav_duration}s, stream ${pcm_duration}s, identical audio: ${identical_audio}"
+if [ "$identical_audio" != yes ] || (( (wav_end - wav_start) * 2 >= pcm_end - pcm_start )); then
+    echo "WAV request did not confirm a byte-identical PCM-filled cache hit"
     exit 1
 fi
 

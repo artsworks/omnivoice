@@ -172,10 +172,9 @@ static void tts_on_signal(int) {
     }
 }
 
-// Clamp to [-1, 1] and scale to s16. lrintf rounds to nearest, ties to even.
+// Same conversion as audio_encode_wav_s16, so PCM and WAV bytes match.
 static inline int16_t tts_f32_to_s16(float x) {
-    float v = x < -1.0f ? -1.0f : (x > 1.0f ? 1.0f : x);
-    return (int16_t) lrintf(v * 32767.0f);
+    return (int16_t) (wav_clamp1(wav_sanitize(x)) * 32767.0f);
 }
 
 // Append a mono f32 block as s16le bytes onto out.
@@ -365,8 +364,16 @@ static void tts_handle_speech(const tts_backend & be, const httplib::Request & h
     res.set_chunked_content_provider(
         "audio/pcm", [&be, req, cache_key](size_t, httplib::DataSink & sink) mutable -> bool {
             std::vector<float> buf;
-            tts_sink           push = [&sink, &buf](const float * s, int n) {
-                buf.insert(buf.end(), s, s + n);
+            bool               keep = static_cast<bool>(be.cache_key);
+            tts_sink           push = [&sink, &buf, &keep](const float * s, int n) {
+                if (keep) {
+                    if ((buf.size() + (size_t) n) * 2 + 44 > TTS_CACHE_MAX_BYTES) {
+                        keep = false;
+                        std::vector<float>().swap(buf);
+                    } else {
+                        buf.insert(buf.end(), s, s + n);
+                    }
+                }
                 std::string bytes;
                 tts_append_s16le(bytes, s, n);
                 return sink.write(bytes.data(), bytes.size());
@@ -375,7 +382,7 @@ static void tts_handle_speech(const tts_backend & be, const httplib::Request & h
             {
                 std::lock_guard<std::mutex> lock(g_synth_mutex);
                 int                         rc = be.synthesize(req, push, synth_err);
-                if (rc == 0 && be.cache_key) {
+                if (rc == 0 && keep) {
                     tts_wav_cache_put(cache_key, audio_encode_wav(buf.data(), (int) buf.size(), 24000, WAV_S16));
                 }
             }
